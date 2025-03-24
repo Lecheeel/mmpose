@@ -2,7 +2,7 @@
 
 ## 项目简介
 
-这是一个基于MMPose的多摄像头人体姿态估计系统，能够实时捕获和分析多个摄像头中的人体姿态，支持人员跟踪和骨架可视化。
+这是一个基于MMPose的多摄像头人体姿态估计系统，能够实时捕获和分析多个摄像头中的人体姿态，支持人员跟踪和骨架可视化。本项目由福州理工学院AGELAB开发。
 
 ## 功能特点
 
@@ -375,4 +375,8 @@ process2 = mp.Process(target=camera_process, args=(1, return_dict, shared_data, 
 - [OpenMMLab官方文档](https://openmmlab.com/codebase)
 - [COCO Wholebody数据集](https://github.com/jin-s13/COCO-WholeBody)
 - [人体姿态估计综述论文](https://arxiv.org/abs/2012.13392)
+
+## 开发团队
+
+本项目由福州理工学院AGELAB开发和维护。
 
