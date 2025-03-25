@@ -11,7 +11,7 @@ DEFAULT_INFERENCE_CONFIG = {
     'show': False,  # 我们自己处理显示
     'draw_bbox': False,
     'radius': 5,
-    'thickness': 3,
+    'thickness': 2,
     'kpt_thr': 0.4,
     'bbox_thr': 0.3,
     'nms_thr': 0.65,  # 对于rtmpose，更高的NMS阈值通常更好
