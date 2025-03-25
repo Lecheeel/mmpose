@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 from typing import Dict, List
+from . import config
 
 def process_pose_results(frame: np.ndarray, results: List, call_args: Dict) -> np.ndarray:
     """处理姿态估计结果并绘制到帧上
@@ -38,31 +39,8 @@ def process_pose_results(frame: np.ndarray, results: List, call_args: Dict) -> n
         (16, 21), (16, 20)
     ]
     
-    # 为骨架连接定义颜色
-    link_colors = [
-        (255, 0, 0),   # 鼻子到左眼 - 红色
-        (255, 0, 0),   # 鼻子到右眼 - 红色
-        (255, 0, 0),   # 左眼到左耳 - 红色
-        (255, 0, 0),   # 右眼到右耳 - 红色
-        (255, 165, 0), # 颈部连接 - 橙色
-        (255, 165, 0), # 颈部连接 - 橙色
-        (255, 165, 0), # 颈部连接 - 橙色
-        (0, 255, 0),   # 左上肢 - 绿色
-        (0, 255, 0),   # 左上肢 - 绿色
-        (0, 0, 255),   # 右上肢 - 蓝色
-        (0, 0, 255),   # 右上肢 - 蓝色
-        (255, 255, 0), # 左肩到左髋 - 黄色
-        (255, 0, 255), # 右肩到右髋 - 紫色
-        (128, 128, 0), # 髋部连接 - 橄榄色
-        (255, 255, 0), # 左下肢 - 黄色
-        (255, 255, 0), # 左下肢 - 黄色
-        (255, 0, 255), # 右下肢 - 紫色
-        (255, 0, 255), # 右下肢 - 紫色
-        (0, 255, 255), # 左脚 - 青色
-        (0, 255, 255), # 左脚 - 青色
-        (128, 0, 128), # 右脚 - 深紫色
-        (128, 0, 128)  # 右脚 - 深紫色
-    ]
+    # 为骨架连接定义颜色 - 使用配置中的颜色
+    link_colors = config.ColorConfig.SKELETON_COLORS
 
     # 人员计数器
     person_count = 0
@@ -140,7 +118,7 @@ def process_single_person(display_frame, instance, person_idx, kept_indices, ske
                     neck_vertebra_point = (neck_vertebra_x, neck_vertebra_y)
                     
                     # 绘制颈椎中点
-                    cv2.circle(display_frame, neck_vertebra_point, call_args['radius'], (0, 165, 255), -1)
+                    cv2.circle(display_frame, neck_vertebra_point, call_args['radius'], config.ColorConfig.NECK_VERTEBRA_COLOR, -1)
                 
                 # 计算新的关键点: 髂前上棘连线中点（左右髋部的中点）
                 hip_valid = (keypoint_scores[11] > call_args['kpt_thr'] and 
@@ -152,17 +130,17 @@ def process_single_person(display_frame, instance, person_idx, kept_indices, ske
                     hip_mid_point = (hip_mid_x, hip_mid_y)
                     
                     # 绘制髂前上棘连线中点
-                    cv2.circle(display_frame, hip_mid_point, call_args['radius'], (165, 0, 255), -1)
+                    cv2.circle(display_frame, hip_mid_point, call_args['radius'], config.ColorConfig.HIP_MID_COLOR, -1)
                 
                 # 如果两个点都有效，绘制它们之间的连线
                 if neck_valid and hip_valid:
-                    cv2.line(display_frame, neck_vertebra_point, hip_mid_point, (255, 255, 255), call_args['thickness'])
+                    cv2.line(display_frame, neck_vertebra_point, hip_mid_point, config.ColorConfig.SPINE_COLOR, call_args['thickness'])
                 
                 # 只绘制需要的关键点
                 for idx in kept_indices:
                     if idx < len(keypoints) and keypoint_scores[idx] > call_args['kpt_thr']:
                         x, y = int(keypoints[idx][0]), int(keypoints[idx][1])
-                        cv2.circle(display_frame, (x, y), call_args['radius'], (0, 255, 0), -1)
+                        cv2.circle(display_frame, (x, y), call_args['radius'], config.ColorConfig.KEYPOINT_COLOR, -1)
                 
                 # 绘制骨架连线
                 for sk_idx, (start_idx, end_idx) in enumerate(skeleton):
@@ -173,7 +151,7 @@ def process_single_person(display_frame, instance, person_idx, kept_indices, ske
                         start_pt = (int(keypoints[start_idx][0]), int(keypoints[start_idx][1]))
                         end_pt = (int(keypoints[end_idx][0]), int(keypoints[end_idx][1]))
                         
-                        color = link_colors[sk_idx] if sk_idx < len(link_colors) else (0, 255, 0)
+                        color = link_colors[sk_idx] if sk_idx < len(link_colors) else config.ColorConfig.KEYPOINT_COLOR
                         thickness = call_args['thickness']
                         cv2.line(display_frame, start_pt, end_pt, color, thickness)
                 
@@ -182,16 +160,19 @@ def process_single_person(display_frame, instance, person_idx, kept_indices, ske
                     id_x = int(keypoints[0][0])
                     id_y = int(keypoints[0][1] - 30)  # 在头部上方放置ID标签
                     # 绘制黑色背景框增强可读性
-                    cv2.rectangle(display_frame, (id_x-20, id_y-15), (id_x+20, id_y+5), (0, 0, 0), -1)
+                    padx, pady = config.DisplayConfig.ID_BACKGROUND_PADDING
+                    cv2.rectangle(display_frame, (id_x-padx, id_y-pady), (id_x+padx, id_y+5), (0, 0, 0), -1)
                     # 绘制ID文本
-                    cv2.putText(display_frame, f"ID:{track_id}", (id_x-18, id_y), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                    dx, dy = config.DisplayConfig.ID_TEXT_OFFSET
+                    cv2.putText(display_frame, f"ID:{track_id}", (id_x+dx, id_y), 
+                               cv2.FONT_HERSHEY_SIMPLEX, config.DisplayConfig.ID_TEXT_SCALE, 
+                               config.DisplayConfig.ID_TEXT_COLOR, config.DisplayConfig.ID_TEXT_THICKNESS)
             else:
                 # 如果点数不够，只绘制可用关键点
                 for kpt_idx, (kpt, score) in enumerate(zip(keypoints, keypoint_scores)):
                     if kpt_idx in kept_indices and score > call_args['kpt_thr']:
                         x, y = int(kpt[0]), int(kpt[1])
-                        cv2.circle(display_frame, (x, y), call_args['radius'], (0, 255, 0), -1)
+                        cv2.circle(display_frame, (x, y), call_args['radius'], config.ColorConfig.KEYPOINT_COLOR, -1)
     except Exception as e:
         print(f"绘制单个人姿态时出错: {str(e)}")
         return
@@ -205,16 +186,18 @@ def process_single_person(display_frame, instance, person_idx, kept_indices, ske
                 if len(bbox) == 4:
                     # 标准格式 [x1, y1, x2, y2]
                     x1, y1, x2, y2 = [int(float(coord)) if isinstance(coord, (int, float, str)) else int(coord[0]) for coord in bbox]
-                    cv2.rectangle(display_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    cv2.rectangle(display_frame, (x1, y1), (x2, y2), config.ColorConfig.BBOX_COLOR, config.ColorConfig.BBOX_THICKNESS)
                     # 在边界框左上角绘制ID标签
                     cv2.putText(display_frame, f"ID:{track_id}", (x1, y1-5), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+                               cv2.FONT_HERSHEY_SIMPLEX, config.DisplayConfig.ID_TEXT_SCALE, 
+                               config.ColorConfig.BBOX_ID_COLOR, config.DisplayConfig.ID_TEXT_THICKNESS)
                 elif len(bbox) == 5:
                     # 带置信度的格式 [x1, y1, x2, y2, score]
                     x1, y1, x2, y2, _ = [int(float(coord)) if isinstance(coord, (int, float, str)) else int(coord[0]) for coord in bbox[:5]]
-                    cv2.rectangle(display_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    cv2.rectangle(display_frame, (x1, y1), (x2, y2), config.ColorConfig.BBOX_COLOR, config.ColorConfig.BBOX_THICKNESS)
                     # 在边界框左上角绘制ID标签
                     cv2.putText(display_frame, f"ID:{track_id}", (x1, y1-5), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+                               cv2.FONT_HERSHEY_SIMPLEX, config.DisplayConfig.ID_TEXT_SCALE, 
+                               config.ColorConfig.BBOX_ID_COLOR, config.DisplayConfig.ID_TEXT_THICKNESS)
     except Exception as e:
         print(f"处理边界框时出错: {str(e)}, 边界框数据: {bbox}") 

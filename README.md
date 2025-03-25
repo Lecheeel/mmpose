@@ -1,17 +1,166 @@
-# 多摄像头人体姿态估计系统
+# 多摄像头姿态估计系统
+
+基于MMPose的多摄像头姿态估计系统，支持实时检测和跟踪多个人的姿态。
+
+## 功能特点
+
+- 支持多摄像头实时姿态估计
+- 使用RTMPose高性能姿态估计模型
+- 支持人员ID跟踪
+- 优化的多进程处理架构
+- 可配置的参数系统
+
+## 安装依赖
+
+```bash
+pip install -r requirements.txt
+```
+
+## 快速开始
+
+直接运行启动脚本：
+
+```bash
+python run_multi_camera.py
+```
+
+使用自定义配置文件：
+
+```bash
+python run_multi_camera.py --config config.yaml
+```
+
+## 配置系统
+
+系统使用分层的配置管理方式，支持通过YAML文件进行配置。主要配置类别包括：
+
+### 系统配置 (SystemConfig)
+
+控制整体程序行为：
+
+```yaml
+system:
+  # 是否在控制台显示检测到的人数
+  SHOW_DETECTION_COUNT: true
+  # 是否开启调试模式
+  DEBUG_MODE: false
+  # 日志级别: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  LOG_LEVEL: "INFO"
+```
+
+### 模型配置 (ModelConfig)
+
+控制模型选择和推理优化设置：
+
+```yaml
+model:
+  # 使用的姿态估计模型
+  DEFAULT_MODEL: "rtmpose-l_8xb32-270e_coco-wholebody-384x288"
+  # 是否使用半精度浮点数(FP16)
+  USE_FP16: true
+  # 是否启用Tensor Cores (适用于RTX系列显卡)
+  TENSOR_CORES_ENABLED: true
+```
+
+### 推理配置 (InferenceConfig)
+
+控制姿态估计推理参数：
+
+```yaml
+inference:
+  # 推理配置
+  DEFAULT_INFERENCE_CONFIG:
+    # 是否绘制边界框
+    draw_bbox: true
+    # 关键点半径
+    radius: 5
+    # 线条粗细
+    thickness: 2
+    # 关键点置信度阈值
+    kpt_thr: 0.4
+    # 边界框置信度阈值
+    bbox_thr: 0.3
+```
+
+### 跟踪配置 (TrackingConfig)
+
+控制人员ID跟踪参数：
+
+```yaml
+tracking:
+  # IOU跟踪阈值
+  TRACKING_THRESHOLD: 0.3
+```
+
+### 相机配置 (CameraConfig)
+
+控制摄像头参数：
+
+```yaml
+camera:
+  # 相机分辨率
+  DEFAULT_CAMERA_WIDTH: 640
+  DEFAULT_CAMERA_HEIGHT: 480
+  # 相机帧率
+  DEFAULT_CAMERA_FPS: 30
+  # JPEG图像质量（1-100），用于进程间传输图像
+  JPEG_QUALITY: 75
+```
+
+### 显示配置 (DisplayConfig)
+
+控制界面显示参数：
+
+```yaml
+display:
+  # 信息文本颜色 (BGR)
+  INFO_TEXT_COLOR: [0, 255, 0]
+  # 信息文本粗细
+  INFO_TEXT_THICKNESS: 2
+```
+
+### 颜色配置 (ColorConfig)
+
+控制姿态可视化颜色：
+
+```yaml
+color:
+  # 关键点颜色
+  KEYPOINT_COLOR: [0, 255, 0]
+  # 颈椎中点颜色
+  NECK_VERTEBRA_COLOR: [0, 165, 255]
+  # 髋部中点颜色
+  HIP_MID_COLOR: [165, 0, 255]
+  # 脊柱线颜色
+  SPINE_COLOR: [255, 255, 255]
+```
+
+## 命令行参数
+
+系统支持以下命令行参数：
+
+- `--config`: 配置文件路径
+- `--model`: 模型名称
+- `--device`: 设备名称（如 'cuda:0', 'cpu'）
+- `--debug`: 开启调试模式
+
+## 使用示例
+
+使用特定模型和设备：
+
+```bash
+python run_multi_camera.py --model rtmpose-m_8xb32-270e_coco-wholebody-256x192 --device cuda:0
+```
+
+使用配置文件并开启调试模式：
+
+```bash
+python run_multi_camera.py --config config.yaml --debug
+```
 
 ## 项目简介
 
 这是一个基于MMPose的多摄像头人体姿态估计系统，能够实时捕获和分析多个摄像头中的人体姿态，支持人员跟踪和骨架可视化。本项目由福州理工学院AGELAB开发。
-
-## 功能特点
-
-- 支持多摄像头并行处理
-- 实时人体姿态估计
-- 人员ID跟踪与标记
-- 高性能GPU加速处理
-- 骨架和关键点可视化
-- 实时FPS和推理时间统计
 
 ## 系统要求
 

@@ -9,7 +9,7 @@ from . import config
 class CameraCapture:
     """摄像头捕获类，运行在单独的线程中"""
     
-    def __init__(self, camera_id: int = 0, queue_size: int = 5):
+    def __init__(self, camera_id: int = 0, queue_size: int = None):
         """
         初始化摄像头捕获
         
@@ -18,6 +18,7 @@ class CameraCapture:
             queue_size: 帧队列大小
         """
         self.camera_id = camera_id
+        queue_size = queue_size or config.InferenceConfig.INPUT_QUEUE_SIZE
         self.frame_queue = queue.Queue(maxsize=queue_size)
         self.cap = None
         self.frame_count = 0
@@ -36,9 +37,9 @@ class CameraCapture:
         # 设置缓冲区大小为1，减少延迟
         self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         # 设置合适的分辨率和帧率，提高效率
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, config.DEFAULT_CAMERA_WIDTH)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, config.DEFAULT_CAMERA_HEIGHT)
-        self.cap.set(cv2.CAP_PROP_FPS, config.DEFAULT_CAMERA_FPS)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, config.CameraConfig.DEFAULT_CAMERA_WIDTH)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, config.CameraConfig.DEFAULT_CAMERA_HEIGHT)
+        self.cap.set(cv2.CAP_PROP_FPS, config.CameraConfig.DEFAULT_CAMERA_FPS)
         
         if not self.cap.isOpened():
             print("无法打开摄像头")

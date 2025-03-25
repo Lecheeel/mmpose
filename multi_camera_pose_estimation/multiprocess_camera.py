@@ -8,7 +8,7 @@ from . import config
 from .utils import torch_inference_mode, init_torch_settings
 from .pose_visualization import process_pose_results
 
-def camera_process(camera_id, return_dict, shared_data, model_name='rtmpose-l_8xb32-270e_coco-wholebody-384x288', device='cuda:0'):
+def camera_process(camera_id, return_dict, shared_data, model_name=None, device='cuda:0'):
     """每个摄像头的独立处理进程
     
     Args:
@@ -19,6 +19,9 @@ def camera_process(camera_id, return_dict, shared_data, model_name='rtmpose-l_8x
         device: 设备名称
     """
     try:
+        # 设置模型名称，如果未提供则使用默认值
+        model_name = model_name or config.ModelConfig.DEFAULT_MODEL
+        
         # 设置CUDNN加速
         init_torch_settings(device)
         
@@ -36,9 +39,9 @@ def camera_process(camera_id, return_dict, shared_data, model_name='rtmpose-l_8x
         # 设置缓冲区大小为1，减少延迟
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         # 设置合适的分辨率和帧率
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, config.DEFAULT_CAMERA_WIDTH)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, config.DEFAULT_CAMERA_HEIGHT)
-        cap.set(cv2.CAP_PROP_FPS, config.DEFAULT_CAMERA_FPS)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, config.CameraConfig.DEFAULT_CAMERA_WIDTH)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, config.CameraConfig.DEFAULT_CAMERA_HEIGHT)
+        cap.set(cv2.CAP_PROP_FPS, config.CameraConfig.DEFAULT_CAMERA_FPS)
 
         # 在独立进程中初始化模型
         try:
@@ -51,9 +54,10 @@ def camera_process(camera_id, return_dict, shared_data, model_name='rtmpose-l_8x
             print(f"进程 {camera_id} 成功加载模型到 {device}")
             
             # 预热模型以初始化CUDA核心和缓存
-            dummy_frame = np.zeros((config.DEFAULT_CAMERA_HEIGHT, config.DEFAULT_CAMERA_WIDTH, 3), dtype=np.uint8)
+            dummy_frame = np.zeros((config.CameraConfig.DEFAULT_CAMERA_HEIGHT, 
+                                     config.CameraConfig.DEFAULT_CAMERA_WIDTH, 3), dtype=np.uint8)
             with torch_inference_mode():
-                for _ in range(10):  # 预热10次
+                for _ in range(config.ModelConfig.MODEL_WARMUP_COUNT):  # 预热多次
                     _ = list(inferencer(dummy_frame))
                     
                 # 强制同步GPU，确保预热完成    
@@ -65,18 +69,8 @@ def camera_process(camera_id, return_dict, shared_data, model_name='rtmpose-l_8x
             return_dict[f'error_{camera_id}'] = f"模型加载失败: {str(e)}"
             return
             
-        # 推理配置 - 微调提高性能
-        call_args = {
-            'show': False,
-            'draw_bbox': True,  
-            'radius': 5, 
-            'thickness': 2, 
-            'kpt_thr': 0.3,  # 略微降低阈值提高检测能力
-            'bbox_thr': 0.3,
-            'nms_thr': 0.5,
-            'pose_based_nms': True,
-            'max_num_bboxes': 15
-        }
+        # 推理配置 - 从全局配置复制
+        call_args = config.InferenceConfig.DEFAULT_INFERENCE_CONFIG.copy()
         
         # 性能统计
         inference_times = []
@@ -84,12 +78,13 @@ def camera_process(camera_id, return_dict, shared_data, model_name='rtmpose-l_8x
         start_time = time.time()
         
         # 创建图像转换缓存 - 预分配内存
-        img_cache = np.empty((config.DEFAULT_CAMERA_HEIGHT, config.DEFAULT_CAMERA_WIDTH, 3), dtype=np.uint8)
+        img_cache = np.empty((config.CameraConfig.DEFAULT_CAMERA_HEIGHT, 
+                               config.CameraConfig.DEFAULT_CAMERA_WIDTH, 3), dtype=np.uint8)
         
         # 跟踪状态变量
         results_last = []  # 上一帧的结果
         next_id = 0        # 下一个可用的ID
-        tracking_thr = config.TRACKING_THRESHOLD  # IOU阈值
+        tracking_thr = config.TrackingConfig.TRACKING_THRESHOLD  # IOU阈值
         
         # 自定义跟踪函数
         def track_by_iou(bbox, results_last, thr):
@@ -134,7 +129,7 @@ def camera_process(camera_id, return_dict, shared_data, model_name='rtmpose-l_8x
                 print(f"摄像头 {camera_id} 无法读取帧，尝试重新初始化...")
                 # 尝试重新初始化摄像头
                 cap.release()
-                time.sleep(1.0)
+                time.sleep(config.CameraConfig.CAMERA_RECONNECT_DELAY)
                 cap = cv2.VideoCapture(camera_id, cv2.CAP_DSHOW)
                 if not cap.isOpened():
                     print(f"摄像头 {camera_id} 无法重新打开，退出进程")
@@ -142,9 +137,9 @@ def camera_process(camera_id, return_dict, shared_data, model_name='rtmpose-l_8x
                 # 重新设置摄像头参数
                 cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                cap.set(cv2.CAP_PROP_FRAME_WIDTH, config.DEFAULT_CAMERA_WIDTH)
-                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, config.DEFAULT_CAMERA_HEIGHT)
-                cap.set(cv2.CAP_PROP_FPS, config.DEFAULT_CAMERA_FPS)
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, config.CameraConfig.DEFAULT_CAMERA_WIDTH)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, config.CameraConfig.DEFAULT_CAMERA_HEIGHT)
+                cap.set(cv2.CAP_PROP_FPS, config.CameraConfig.DEFAULT_CAMERA_FPS)
                 continue
                 
             frame_count += 1
@@ -172,7 +167,7 @@ def camera_process(camera_id, return_dict, shared_data, model_name='rtmpose-l_8x
             
             inference_time = time.time() - start_inference
             inference_times.append(inference_time)
-            if len(inference_times) > 30:
+            if len(inference_times) > config.InferenceConfig.STATS_WINDOW_SIZE:
                 inference_times.pop(0)
             
             # 添加跟踪ID处理
@@ -291,7 +286,7 @@ def camera_process(camera_id, return_dict, shared_data, model_name='rtmpose-l_8x
             fps = frame_count / elapsed_time if elapsed_time > 0 else 0
             
             # 每100帧重置计数器，防止数值过大
-            if frame_count >= 100:
+            if frame_count >= config.InferenceConfig.FPS_RESET_INTERVAL:
                 start_time = time.time()
                 frame_count = 0
                 
@@ -301,23 +296,27 @@ def camera_process(camera_id, return_dict, shared_data, model_name='rtmpose-l_8x
             # 添加FPS和性能信息
             avg_inference_time_ms = avg_inference_time * 1000  # 转换为毫秒
             info_text = f"CAM {camera_id} | FPS: {fps:.1f} | Inference: {avg_inference_time_ms:.0f}ms"
-            cv2.putText(display_frame, info_text, (10, 30), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            cv2.putText(display_frame, info_text, 
+                        config.DisplayConfig.INFO_TEXT_POSITION, 
+                        cv2.FONT_HERSHEY_SIMPLEX, 
+                        config.DisplayConfig.INFO_TEXT_SCALE, 
+                        config.DisplayConfig.INFO_TEXT_COLOR, 
+                        config.DisplayConfig.INFO_TEXT_THICKNESS)
             
             # 将结果存储在共享字典中
             # 优化：使用更低的JPEG质量，进一步加快编码速度
-            _, buffer = cv2.imencode('.jpg', display_frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+            _, buffer = cv2.imencode('.jpg', display_frame, [cv2.IMWRITE_JPEG_QUALITY, config.CameraConfig.JPEG_QUALITY])
             return_dict[f'frame_{camera_id}'] = buffer.tobytes()
             
             # 主动释放不需要的大型对象和清理内存
             del raw_results
             if 'cuda' in device:
                 # 定期清理CUDA缓存
-                if frame_count % 100 == 0:
+                if frame_count % config.TrackingConfig.CUDA_CACHE_CLEAR_INTERVAL == 0:
                     torch.cuda.empty_cache()
             
             # 为了调试输出检测到的人数
-            if len(current_results) > 0:
+            if len(current_results) > 0 and config.SystemConfig.SHOW_DETECTION_COUNT:
                 print(f"摄像头 {camera_id} 检测到 {len(current_results)} 人")
             
     except Exception as e:

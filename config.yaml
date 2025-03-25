@@ -1,0 +1,61 @@
+# 多摄像头姿态估计系统配置文件
+# 可以根据需要修改以下配置参数
+
+system:
+  # 是否在控制台显示检测到的人数
+  SHOW_DETECTION_COUNT: true
+  # 是否开启调试模式
+  DEBUG_MODE: false
+  # 日志级别: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  LOG_LEVEL: "INFO"
+
+model:
+  # 使用的姿态估计模型
+  DEFAULT_MODEL: "rtmpose-l_8xb32-270e_coco-wholebody-384x288"
+  # 是否使用半精度浮点数(FP16)
+  USE_FP16: true
+  # 是否启用Tensor Cores (适用于RTX系列显卡)
+  TENSOR_CORES_ENABLED: true
+
+inference:
+  # 推理配置
+  DEFAULT_INFERENCE_CONFIG:
+    # 是否绘制边界框
+    draw_bbox: true
+    # 关键点半径
+    radius: 5
+    # 线条粗细
+    thickness: 2
+    # 关键点置信度阈值
+    kpt_thr: 0.4
+    # 边界框置信度阈值
+    bbox_thr: 0.3
+
+tracking:
+  # IOU跟踪阈值
+  TRACKING_THRESHOLD: 0.3
+
+camera:
+  # 相机分辨率
+  DEFAULT_CAMERA_WIDTH: 640
+  DEFAULT_CAMERA_HEIGHT: 480
+  # 相机帧率
+  DEFAULT_CAMERA_FPS: 30
+  # JPEG图像质量（1-100），用于进程间传输图像
+  JPEG_QUALITY: 75
+
+display:
+  # 信息文本颜色 (BGR)
+  INFO_TEXT_COLOR: [0, 255, 0]
+  # 信息文本粗细
+  INFO_TEXT_THICKNESS: 2
+
+color:
+  # 关键点颜色
+  KEYPOINT_COLOR: [0, 255, 0]
+  # 颈椎中点颜色
+  NECK_VERTEBRA_COLOR: [0, 165, 255]
+  # 髋部中点颜色
+  HIP_MID_COLOR: [165, 0, 255]
+  # 脊柱线颜色
+  SPINE_COLOR: [255, 255, 255] 

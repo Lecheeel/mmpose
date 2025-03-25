@@ -6,11 +6,11 @@ from . import config
 @contextmanager
 def torch_inference_mode():
     """使用torch推理模式的上下文管理器，优化推理性能"""
-    if config.USE_INFERENCE_MODE:
-        with torch.inference_mode(), torch.amp.autocast(device_type='cuda', enabled=config.USE_FP16):
+    if config.ModelConfig.USE_INFERENCE_MODE:
+        with torch.inference_mode(), torch.amp.autocast(device_type='cuda', enabled=config.ModelConfig.USE_FP16):
             yield
     else:
-        with torch.no_grad(), torch.amp.autocast(device_type='cuda', enabled=config.USE_FP16):
+        with torch.no_grad(), torch.amp.autocast(device_type='cuda', enabled=config.ModelConfig.USE_FP16):
             yield
 
 def init_torch_settings(device):
@@ -23,7 +23,7 @@ def init_torch_settings(device):
         torch.backends.cudnn.benchmark = True
         torch.backends.cudnn.deterministic = False
         torch.backends.cudnn.enabled = True
-        if config.TENSOR_CORES_ENABLED:
+        if config.ModelConfig.TENSOR_CORES_ENABLED:
             # 启用TensorCores以加速卷积运算
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True

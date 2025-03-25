@@ -12,9 +12,9 @@ from .utils import torch_inference_mode, init_torch_settings
 class FrameProcessor:
     """处理视频帧的类，支持异步操作"""
     
-    def __init__(self, model_name: str, device: str, 
-                 input_queue_size: int = 5,
-                 output_queue_size: int = 5,
+    def __init__(self, model_name: str = None, device: str = 'cuda:0', 
+                 input_queue_size: int = None,
+                 output_queue_size: int = None,
                  model_config: Dict = None):
         """
         初始化帧处理器
@@ -27,12 +27,17 @@ class FrameProcessor:
             model_config: 模型配置参数
         """
         self.device = device
-        self.model_name = model_name
+        self.model_name = model_name or config.ModelConfig.DEFAULT_MODEL
+        
+        # 设置队列大小
+        input_queue_size = input_queue_size or config.InferenceConfig.INPUT_QUEUE_SIZE
+        output_queue_size = output_queue_size or config.InferenceConfig.OUTPUT_QUEUE_SIZE
+        
         self.input_queue = queue.Queue(maxsize=input_queue_size)
         self.output_queue = queue.Queue(maxsize=output_queue_size)
         
         # 默认推理配置
-        self.call_args = config.DEFAULT_INFERENCE_CONFIG.copy()
+        self.call_args = config.InferenceConfig.DEFAULT_INFERENCE_CONFIG.copy()
         
         # 如果提供了模型配置，则更新配置
         if model_config:
@@ -63,9 +68,11 @@ class FrameProcessor:
             )
             
             # 执行模型预热，使CUDA初始化所有缓存和进行图优化
-            dummy_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+            dummy_frame = np.zeros((config.CameraConfig.DEFAULT_CAMERA_HEIGHT, 
+                                     config.CameraConfig.DEFAULT_CAMERA_WIDTH, 3), dtype=np.uint8)
+            
             with torch_inference_mode():
-                for _ in range(10):  # 多次预热
+                for _ in range(config.ModelConfig.MODEL_WARMUP_COUNT):  # 多次预热
                     _ = list(self.inferencer(dummy_frame))
                 # 强制同步GPU，确保预热完成
                 if 'cuda' in self.device:
@@ -119,7 +126,7 @@ class FrameProcessor:
                 self.last_inference_time = inference_time
                 self.inference_times.append(inference_time)
                 # 保持统计列表在合理大小
-                if len(self.inference_times) > 30:
+                if len(self.inference_times) > config.InferenceConfig.STATS_WINDOW_SIZE:
                     self.inference_times.pop(0)
                 
                 # 将结果放入输出队列
