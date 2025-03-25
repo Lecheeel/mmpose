@@ -69,8 +69,8 @@ def camera_process(camera_id, return_dict, shared_data, model_name='rtmpose-l_8x
         call_args = {
             'show': False,
             'draw_bbox': True,  
-            'radius': 3,  # 减小关键点半径加快渲染
-            'thickness': 1,  # 减小线条粗细加快渲染
+            'radius': 5, 
+            'thickness': 3, 
             'kpt_thr': 0.3,  # 略微降低阈值提高检测能力
             'bbox_thr': 0.3,
             'nms_thr': 0.5,
