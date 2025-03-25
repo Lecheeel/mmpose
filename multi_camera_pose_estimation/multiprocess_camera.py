@@ -8,7 +8,7 @@ from . import config
 from .utils import torch_inference_mode, init_torch_settings
 from .pose_visualization import process_pose_results
 
-def camera_process(camera_id, return_dict, shared_data, model_name=None, device='cuda:0'):
+def camera_process(camera_id, return_dict, shared_data, model_name=None, device='cuda:0', custom_frame_processor=None):
     """每个摄像头的独立处理进程
     
     Args:
@@ -17,6 +17,7 @@ def camera_process(camera_id, return_dict, shared_data, model_name=None, device=
         shared_data: 进程间共享数据
         model_name: 模型名称
         device: 设备名称
+        custom_frame_processor: 自定义帧处理函数，如果提供则用它处理帧
     """
     try:
         # 设置模型名称，如果未提供则使用默认值
@@ -276,7 +277,12 @@ def camera_process(camera_id, return_dict, shared_data, model_name=None, device=
                 
             # 处理结果并渲染到帧上
             try:
-                display_frame = process_pose_results(frame, raw_results, call_args)
+                if custom_frame_processor:
+                    # 如果提供了自定义处理函数，使用它
+                    display_frame = custom_frame_processor(frame, raw_results, camera_id)
+                else:
+                    # 否则使用默认处理函数
+                    display_frame = process_pose_results(frame, raw_results, call_args)
             except Exception as e:
                 print(f"处理姿态结果时出错: {str(e)}")
                 display_frame = frame.copy()  # 降级为原始帧
