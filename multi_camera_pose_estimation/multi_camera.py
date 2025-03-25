@@ -16,7 +16,7 @@ running = True
 
 # 新增：模型量化设置
 USE_FP16 = True  # 是否使用半精度浮点数(FP16)，提高推理速度
-USE_INFERENCE_MODE = True  # 使用inference_mode而非no_grad，进一步优化
+USE_INFERENCE_MODE = True  # 使用inference_mode而非no_grad
 TENSOR_CORES_ENABLED = True  # 是否启用Tensor Cores (适用于RTX系列显卡)
 
 # 使用上下文管理器进行CUDA异步处理
@@ -56,8 +56,8 @@ class FrameProcessor:
         self.call_args = {
             'show': False,  # 我们自己处理显示
             'draw_bbox': False,
-            'radius': 4,  # 稍微减小，提升渲染速度
-            'thickness': 1,  # 减小线条粗细，提升渲染速度
+            'radius': 5,
+            'thickness': 3,
             'kpt_thr': 0.4,
             'bbox_thr': 0.3,
             'nms_thr': 0.65,  # 对于rtmpose，更高的NMS阈值通常更好
@@ -852,7 +852,6 @@ def main():
         shared_data = SharedData()
         shared_data.running.value = True
         
-        # 创建两个摄像头处理进程 - 使用更轻量级的模型配置
         process1 = mp.Process(target=camera_process, args=(0, return_dict, shared_data, 'rtmpose-l_8xb32-270e_coco-wholebody-384x288', device))
         process2 = mp.Process(target=camera_process, args=(1, return_dict, shared_data, 'rtmpose-l_8xb32-270e_coco-wholebody-384x288', device))
         
@@ -862,19 +861,7 @@ def main():
         
         print("按'q'键退出")
         
-        # 主循环 - 显示结果
-        last_frame_time = time.time()
-        display_interval = 1.0/30.0  # 限制显示帧率到30FPS
-        
         while True:
-            # 限制帧率，降低CPU使用率
-            current_time = time.time()
-            if current_time - last_frame_time < display_interval:
-                time.sleep(0.001)  # 短暂休眠，减少CPU使用
-                continue
-            
-            last_frame_time = current_time
-            
             # 检查是否有帧需要显示
             frames_to_show = False
             
