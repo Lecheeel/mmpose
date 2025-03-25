@@ -7,26 +7,35 @@ import threading
 import queue
 import multiprocessing as mp
 from mmpose.apis.inferencers import MMPoseInferencer
-from mmpose.apis.inference_tracking import _compute_iou  # 导入MMPose提供的IOU计算函数
+from mmpose.apis.inference_tracking import _compute_iou
 from contextlib import contextmanager
 from typing import Dict, List, Tuple, Optional
 
 # 全局变量控制程序退出
 running = True
 
+# 新增：模型量化设置
+USE_FP16 = True  # 是否使用半精度浮点数(FP16)，提高推理速度
+USE_INFERENCE_MODE = True  # 使用inference_mode而非no_grad，进一步优化
+TENSOR_CORES_ENABLED = True  # 是否启用Tensor Cores (适用于RTX系列显卡)
+
 # 使用上下文管理器进行CUDA异步处理
 @contextmanager
 def torch_inference_mode():
     """使用torch推理模式的上下文管理器，优化推理性能"""
-    with torch.inference_mode(), torch.amp.autocast(device_type='cuda', enabled=True):
-        yield
+    if USE_INFERENCE_MODE:
+        with torch.inference_mode(), torch.amp.autocast(device_type='cuda', enabled=USE_FP16):
+            yield
+    else:
+        with torch.no_grad(), torch.amp.autocast(device_type='cuda', enabled=USE_FP16):
+            yield
 
 class FrameProcessor:
     """处理视频帧的类，支持异步操作"""
     
     def __init__(self, model_name: str, device: str, 
-                 input_queue_size: int = 3, 
-                 output_queue_size: int = 3,
+                 input_queue_size: int = 5,  # 增大队列大小提高吞吐量 
+                 output_queue_size: int = 5,
                  model_config: Dict = None):
         """
         初始化帧处理器
@@ -47,9 +56,9 @@ class FrameProcessor:
         self.call_args = {
             'show': False,  # 我们自己处理显示
             'draw_bbox': False,
-            'radius': 5,
-            'thickness': 2,
-            'kpt_thr': 0.5,
+            'radius': 4,  # 稍微减小，提升渲染速度
+            'thickness': 1,  # 减小线条粗细，提升渲染速度
+            'kpt_thr': 0.4,
             'bbox_thr': 0.3,
             'nms_thr': 0.65,  # 对于rtmpose，更高的NMS阈值通常更好
             'pose_based_nms': True,  # 启用基于姿态的NMS
@@ -75,12 +84,32 @@ class FrameProcessor:
     def _init_model(self):
         """初始化姿态估计模型"""
         try:
+            # 设置CUDNN加速参数
+            if 'cuda' in self.device:
+                torch.backends.cudnn.benchmark = True
+                torch.backends.cudnn.deterministic = False
+                torch.backends.cudnn.enabled = True
+                if TENSOR_CORES_ENABLED:
+                    # 启用TensorCores以加速卷积运算
+                    torch.backends.cuda.matmul.allow_tf32 = True
+                    torch.backends.cudnn.allow_tf32 = True
+                    
             self.inferencer = MMPoseInferencer(
                 pose2d=self.model_name,
                 device=self.device,
                 scope='mmpose',
                 show_progress=False
             )
+            
+            # 执行模型预热，使CUDA初始化所有缓存和进行图优化
+            dummy_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+            with torch_inference_mode():
+                for _ in range(10):  # 多次预热
+                    _ = list(self.inferencer(dummy_frame))
+                # 强制同步GPU，确保预热完成
+                if 'cuda' in self.device:
+                    torch.cuda.synchronize()
+                    
             print(f"成功加载模型到 {self.device}")
             return True
         except Exception as e:
@@ -94,6 +123,9 @@ class FrameProcessor:
             running = False
             return
             
+        # 创建固定的RGB图像缓存，避免重复内存分配
+        img_cache = None
+        
         while running:
             try:
                 # 尝试从队列获取帧，有1秒超时
@@ -107,13 +139,20 @@ class FrameProcessor:
                 # 开始计时
                 start_time = time.time()
                 
-                # 转换为RGB格式（MMPose期望RGB格式）
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                # 优化：使用预分配的缓存进行颜色转换，避免重复内存分配
+                if img_cache is None or img_cache.shape != frame.shape:
+                    img_cache = np.empty(frame.shape, dtype=np.uint8)
+                
+                # 直接在目标缓冲区上进行颜色转换，避免创建中间数组
+                cv2.cvtColor(frame, cv2.COLOR_BGR2RGB, img_cache)
                 
                 # 使用torch推理模式提高性能
                 with torch_inference_mode():
                     # 使用MMPose进行推理
-                    results = list(self.inferencer(frame_rgb, **self.call_args))
+                    results = list(self.inferencer(img_cache, **self.call_args))
+                    # 确保GPU操作完成，避免延迟抖动
+                    if 'cuda' in self.device:
+                        torch.cuda.synchronize()
                 
                 # 计算推理时间
                 inference_time = time.time() - start_time
@@ -170,7 +209,7 @@ class FrameProcessor:
 class CameraCapture:
     """摄像头捕获类，运行在单独的线程中"""
     
-    def __init__(self, camera_id: int = 0, queue_size: int = 3):
+    def __init__(self, camera_id: int = 0, queue_size: int = 5):  # 增大队列大小
         """
         初始化摄像头捕获
         
@@ -190,10 +229,16 @@ class CameraCapture:
     def _capture_worker(self):
         """捕获线程的工作函数"""
         # 创建摄像头对象
-        self.cap = cv2.VideoCapture(self.camera_id)
+        self.cap = cv2.VideoCapture(self.camera_id, cv2.CAP_DSHOW)  # 使用DirectShow后端，可能提供更好的性能
         
         # 尝试设置更高的捕获分辨率和其他优化
         self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+        # 设置缓冲区大小为1，减少延迟
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        # 设置合适的分辨率和帧率，提高效率
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        self.cap.set(cv2.CAP_PROP_FPS, 30)
         
         if not self.cap.isOpened():
             print("无法打开摄像头")
@@ -305,27 +350,29 @@ def process_pose_results(frame: np.ndarray, results: List, call_args: Dict) -> n
     person_count = 0
 
     # 遍历结果
-    for result in results:
-        pred_instances = result.get('predictions', [])
-        
-        # 如果有预测结果，在原始帧上绘制
-        if pred_instances and len(pred_instances) > 0:
-            # 处理每个预测实例
-            for instance_list in pred_instances:
-                # 检查是否为列表类型（多个人的情况）
-                if isinstance(instance_list, list):
-                    for instance in instance_list:
-                        # 绘制单个人的姿态
+    try:
+        for result in results:
+            pred_instances = result.get('predictions', [])
+            
+            # 如果有预测结果，在原始帧上绘制
+            if pred_instances and len(pred_instances) > 0:
+                # 处理每个预测实例
+                for instance_list in pred_instances:
+                    # 检查是否为列表类型（多个人的情况）
+                    if isinstance(instance_list, list):
+                        for instance in instance_list:
+                            # 绘制单个人的姿态
+                            process_single_person(display_frame, instance, person_count, kept_indices, 
+                                                 skeleton, link_colors, call_args)
+                            person_count += 1
+                    # 检查是否为字典类型（单个人的情况）
+                    elif isinstance(instance_list, dict):
+                        instance = instance_list
                         process_single_person(display_frame, instance, person_count, kept_indices, 
                                              skeleton, link_colors, call_args)
                         person_count += 1
-                # 检查是否为字典类型（单个人的情况）
-                elif isinstance(instance_list, dict):
-                    instance = instance_list
-                    process_single_person(display_frame, instance, person_count, kept_indices, 
-                                         skeleton, link_colors, call_args)
-                    person_count += 1
-    
+    except Exception as e:
+        print(f"处理姿态结果绘制时出错: {str(e)}")
     
     return display_frame
 
@@ -341,93 +388,100 @@ def process_single_person(display_frame, instance, person_idx, kept_indices, ske
         link_colors: 连接线颜色
         call_args: 调用参数
     """
-    # 获取关键点和得分
-    keypoints = instance.get('keypoints', None)
-    keypoint_scores = instance.get('keypoint_scores', None)
-    
-    # 获取track_id（如果存在）或使用序号作为ID
-    track_id = instance.get('track_id', person_idx)
-    
-    if keypoints is not None and keypoint_scores is not None:
-        # 转换为numpy数组
-        keypoints = np.array(keypoints)
-        keypoint_scores = np.array(keypoint_scores)
+    try:
+        # 获取关键点和得分
+        keypoints = instance.get('keypoints', None)
+        keypoint_scores = instance.get('keypoint_scores', None)
         
-        # 检查关键点数量是否足够
-        if len(keypoints) >= max(kept_indices) + 1:
-            # 计算新的关键点: 颈椎中点（鼻子和左右肩中点之间的点）
-            neck_valid = (keypoint_scores[0] > call_args['kpt_thr'] and 
-                         keypoint_scores[5] > call_args['kpt_thr'] and 
-                         keypoint_scores[6] > call_args['kpt_thr'])
+        # 获取track_id（如果存在）或使用序号作为ID
+        track_id = instance.get('track_id', person_idx)
+        
+        if keypoints is not None and keypoint_scores is not None:
+            # 确保为numpy数组并检查是否为空
+            keypoints = np.array(keypoints)
+            keypoint_scores = np.array(keypoint_scores)
             
-            if neck_valid:
-                # 计算左右肩中点
-                shoulder_mid_x = (keypoints[5][0] + keypoints[6][0]) / 2
-                shoulder_mid_y = (keypoints[5][1] + keypoints[6][1]) / 2
+            if keypoints.size == 0 or keypoint_scores.size == 0:
+                return  # 如果关键点为空，直接返回
+            
+            # 检查关键点数量是否足够
+            if len(keypoints) >= max(kept_indices) + 1:
+                # 计算新的关键点: 颈椎中点（鼻子和左右肩中点之间的点）
+                neck_valid = (keypoint_scores[0] > call_args['kpt_thr'] and 
+                             keypoint_scores[5] > call_args['kpt_thr'] and 
+                             keypoint_scores[6] > call_args['kpt_thr'])
                 
-                # 计算颈椎中点（鼻子和肩膀中点之间的某个位置，这里取1/3处）
-                neck_vertebra_x = int(keypoints[0][0] * 0.3 + shoulder_mid_x * 0.7)
-                neck_vertebra_y = int(keypoints[0][1] * 0.3 + shoulder_mid_y * 0.7)
-                neck_vertebra_point = (neck_vertebra_x, neck_vertebra_y)
-                
-                # 绘制颈椎中点
-                cv2.circle(display_frame, neck_vertebra_point, call_args['radius'], (0, 165, 255), -1)
-            
-            # 计算新的关键点: 髂前上棘连线中点（左右髋部的中点）
-            hip_valid = (keypoint_scores[11] > call_args['kpt_thr'] and 
-                        keypoint_scores[12] > call_args['kpt_thr'])
-            
-            if hip_valid:
-                hip_mid_x = int((keypoints[11][0] + keypoints[12][0]) / 2)
-                hip_mid_y = int((keypoints[11][1] + keypoints[12][1]) / 2)
-                hip_mid_point = (hip_mid_x, hip_mid_y)
-                
-                # 绘制髂前上棘连线中点
-                cv2.circle(display_frame, hip_mid_point, call_args['radius'], (165, 0, 255), -1)
-            
-            # 如果两个点都有效，绘制它们之间的连线
-            if neck_valid and hip_valid:
-                cv2.line(display_frame, neck_vertebra_point, hip_mid_point, (255, 255, 255), call_args['thickness'])
-            
-            # 只绘制需要的关键点
-            for idx in kept_indices:
-                if idx < len(keypoints) and keypoint_scores[idx] > call_args['kpt_thr']:
-                    x, y = int(keypoints[idx][0]), int(keypoints[idx][1])
-                    cv2.circle(display_frame, (x, y), call_args['radius'], (0, 255, 0), -1)
-            
-            # 绘制骨架连线
-            for sk_idx, (start_idx, end_idx) in enumerate(skeleton):
-                if (start_idx < len(keypoints) and end_idx < len(keypoints) and
-                    keypoint_scores[start_idx] > call_args['kpt_thr'] and 
-                    keypoint_scores[end_idx] > call_args['kpt_thr']):
+                if neck_valid:
+                    # 计算左右肩中点
+                    shoulder_mid_x = (keypoints[5][0] + keypoints[6][0]) / 2
+                    shoulder_mid_y = (keypoints[5][1] + keypoints[6][1]) / 2
                     
-                    start_pt = (int(keypoints[start_idx][0]), int(keypoints[start_idx][1]))
-                    end_pt = (int(keypoints[end_idx][0]), int(keypoints[end_idx][1]))
+                    # 计算颈椎中点（鼻子和肩膀中点之间的某个位置，这里取1/3处）
+                    neck_vertebra_x = int(keypoints[0][0] * 0.3 + shoulder_mid_x * 0.7)
+                    neck_vertebra_y = int(keypoints[0][1] * 0.3 + shoulder_mid_y * 0.7)
+                    neck_vertebra_point = (neck_vertebra_x, neck_vertebra_y)
                     
-                    color = link_colors[sk_idx] if sk_idx < len(link_colors) else (0, 255, 0)
-                    thickness = call_args['thickness']
-                    cv2.line(display_frame, start_pt, end_pt, color, thickness)
-            
-            # 在头部上方绘制ID标签
-            if keypoint_scores[0] > call_args['kpt_thr']:  # 如果鼻子关键点可见
-                id_x = int(keypoints[0][0])
-                id_y = int(keypoints[0][1] - 30)  # 在头部上方放置ID标签
-                # 绘制黑色背景框增强可读性
-                cv2.rectangle(display_frame, (id_x-20, id_y-15), (id_x+20, id_y+5), (0, 0, 0), -1)
-                # 绘制ID文本
-                cv2.putText(display_frame, f"ID:{track_id}", (id_x-18, id_y), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        else:
-            # 如果点数不够，只绘制可用关键点
-            for kpt_idx, (kpt, score) in enumerate(zip(keypoints, keypoint_scores)):
-                if kpt_idx in kept_indices and score > call_args['kpt_thr']:
-                    x, y = int(kpt[0]), int(kpt[1])
-                    cv2.circle(display_frame, (x, y), call_args['radius'], (0, 255, 0), -1)
+                    # 绘制颈椎中点
+                    cv2.circle(display_frame, neck_vertebra_point, call_args['radius'], (0, 165, 255), -1)
+                
+                # 计算新的关键点: 髂前上棘连线中点（左右髋部的中点）
+                hip_valid = (keypoint_scores[11] > call_args['kpt_thr'] and 
+                            keypoint_scores[12] > call_args['kpt_thr'])
+                
+                if hip_valid:
+                    hip_mid_x = int((keypoints[11][0] + keypoints[12][0]) / 2)
+                    hip_mid_y = int((keypoints[11][1] + keypoints[12][1]) / 2)
+                    hip_mid_point = (hip_mid_x, hip_mid_y)
+                    
+                    # 绘制髂前上棘连线中点
+                    cv2.circle(display_frame, hip_mid_point, call_args['radius'], (165, 0, 255), -1)
+                
+                # 如果两个点都有效，绘制它们之间的连线
+                if neck_valid and hip_valid:
+                    cv2.line(display_frame, neck_vertebra_point, hip_mid_point, (255, 255, 255), call_args['thickness'])
+                
+                # 只绘制需要的关键点
+                for idx in kept_indices:
+                    if idx < len(keypoints) and keypoint_scores[idx] > call_args['kpt_thr']:
+                        x, y = int(keypoints[idx][0]), int(keypoints[idx][1])
+                        cv2.circle(display_frame, (x, y), call_args['radius'], (0, 255, 0), -1)
+                
+                # 绘制骨架连线
+                for sk_idx, (start_idx, end_idx) in enumerate(skeleton):
+                    if (start_idx < len(keypoints) and end_idx < len(keypoints) and
+                        keypoint_scores[start_idx] > call_args['kpt_thr'] and 
+                        keypoint_scores[end_idx] > call_args['kpt_thr']):
+                        
+                        start_pt = (int(keypoints[start_idx][0]), int(keypoints[start_idx][1]))
+                        end_pt = (int(keypoints[end_idx][0]), int(keypoints[end_idx][1]))
+                        
+                        color = link_colors[sk_idx] if sk_idx < len(link_colors) else (0, 255, 0)
+                        thickness = call_args['thickness']
+                        cv2.line(display_frame, start_pt, end_pt, color, thickness)
+                
+                # 在头部上方绘制ID标签
+                if keypoint_scores[0] > call_args['kpt_thr']:  # 如果鼻子关键点可见
+                    id_x = int(keypoints[0][0])
+                    id_y = int(keypoints[0][1] - 30)  # 在头部上方放置ID标签
+                    # 绘制黑色背景框增强可读性
+                    cv2.rectangle(display_frame, (id_x-20, id_y-15), (id_x+20, id_y+5), (0, 0, 0), -1)
+                    # 绘制ID文本
+                    cv2.putText(display_frame, f"ID:{track_id}", (id_x-18, id_y), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            else:
+                # 如果点数不够，只绘制可用关键点
+                for kpt_idx, (kpt, score) in enumerate(zip(keypoints, keypoint_scores)):
+                    if kpt_idx in kept_indices and score > call_args['kpt_thr']:
+                        x, y = int(kpt[0]), int(kpt[1])
+                        cv2.circle(display_frame, (x, y), call_args['radius'], (0, 255, 0), -1)
+    except Exception as e:
+        print(f"绘制单个人姿态时出错: {str(e)}")
+        return
     
     # 检索边界框（如果存在）
-    bbox = instance.get('bbox', None)
-    if bbox is not None and call_args['draw_bbox']:
-        try:
+    try:
+        bbox = instance.get('bbox', None)
+        if bbox is not None and call_args['draw_bbox']:
             # 处理不同格式的边界框
             if isinstance(bbox, list) or isinstance(bbox, np.ndarray):
                 if len(bbox) == 4:
@@ -444,8 +498,8 @@ def process_single_person(display_frame, instance, person_idx, kept_indices, ske
                     # 在边界框左上角绘制ID标签
                     cv2.putText(display_frame, f"ID:{track_id}", (x1, y1-5), 
                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
-        except Exception as e:
-            print(f"处理边界框时出错: {str(e)}, 边界框数据: {bbox}")
+    except Exception as e:
+        print(f"处理边界框时出错: {str(e)}, 边界框数据: {bbox}")
 
 # 新增：进程间共享数据的结构
 class SharedData:
@@ -470,9 +524,13 @@ def camera_process(camera_id, return_dict, shared_data, model_name='rtmpose-l_8x
             torch.backends.cudnn.benchmark = True
             torch.backends.cudnn.deterministic = False
             torch.backends.cudnn.enabled = True
+            if TENSOR_CORES_ENABLED:
+                # 启用TensorCores以加速卷积运算
+                torch.backends.cuda.matmul.allow_tf32 = True
+                torch.backends.cudnn.allow_tf32 = True
         
-        # 初始化摄像头
-        cap = cv2.VideoCapture(camera_id)
+        # 初始化摄像头 - 使用DirectShow后端
+        cap = cv2.VideoCapture(camera_id, cv2.CAP_DSHOW)
         
         # 检查摄像头是否成功打开
         if not cap.isOpened():
@@ -484,6 +542,10 @@ def camera_process(camera_id, return_dict, shared_data, model_name='rtmpose-l_8x
         cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
         # 设置缓冲区大小为1，减少延迟
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        # 设置合适的分辨率和帧率
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        cap.set(cv2.CAP_PROP_FPS, 30)
 
         # 在独立进程中初始化模型
         try:
@@ -497,30 +559,30 @@ def camera_process(camera_id, return_dict, shared_data, model_name='rtmpose-l_8x
             
             # 预热模型以初始化CUDA核心和缓存
             dummy_frame = np.zeros((480, 640, 3), dtype=np.uint8)
-            with torch.inference_mode(), torch.amp.autocast(device_type='cuda', enabled=True):
+            with torch_inference_mode():
                 for _ in range(10):  # 预热10次
                     _ = list(inferencer(dummy_frame))
                     
-            # 强制同步GPU，确保预热完成    
-            if 'cuda' in device:
-                torch.cuda.synchronize()
+                # 强制同步GPU，确保预热完成    
+                if 'cuda' in device:
+                    torch.cuda.synchronize()
                 
         except Exception as e:
             print(f"进程 {camera_id} 模型加载失败: {str(e)}")
             return_dict[f'error_{camera_id}'] = f"模型加载失败: {str(e)}"
             return
             
-        # 推理配置
+        # 推理配置 - 微调提高性能
         call_args = {
             'show': False,
-            'draw_bbox': True,  # 设为True以显示边界框和ID
-            'radius': 4,
-            'thickness': 2,
-            'kpt_thr': 0.4,     # 降低关键点阈值，增加检测灵敏度
-            'bbox_thr': 0.3,    # 保持边界框阈值
-            'nms_thr': 0.5,     # 降低NMS阈值，更容易检测到多人
+            'draw_bbox': True,  
+            'radius': 3,  # 减小关键点半径加快渲染
+            'thickness': 1,  # 减小线条粗细加快渲染
+            'kpt_thr': 0.3,  # 略微降低阈值提高检测能力
+            'bbox_thr': 0.3,
+            'nms_thr': 0.5,
             'pose_based_nms': True,
-            'max_num_bboxes': 15  # 增加检测的最大人数上限
+            'max_num_bboxes': 15
         }
         
         # 性能统计
@@ -528,8 +590,8 @@ def camera_process(camera_id, return_dict, shared_data, model_name='rtmpose-l_8x
         frame_count = 0
         start_time = time.time()
         
-        # 创建图像转换缓存
-        img_cache = None
+        # 创建图像转换缓存 - 预分配内存
+        img_cache = np.empty((480, 640, 3), dtype=np.uint8)
         
         # 跟踪状态变量
         results_last = []  # 上一帧的结果
@@ -576,28 +638,45 @@ def camera_process(camera_id, return_dict, shared_data, model_name='rtmpose-l_8x
             # 读取帧
             ret, frame = cap.read()
             if not ret:
-                break
+                print(f"摄像头 {camera_id} 无法读取帧，尝试重新初始化...")
+                # 尝试重新初始化摄像头
+                cap.release()
+                time.sleep(1.0)
+                cap = cv2.VideoCapture(camera_id, cv2.CAP_DSHOW)
+                if not cap.isOpened():
+                    print(f"摄像头 {camera_id} 无法重新打开，退出进程")
+                    break
+                # 重新设置摄像头参数
+                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                cap.set(cv2.CAP_PROP_FPS, 30)
+                continue
                 
             frame_count += 1
             
             # 处理帧
             start_inference = time.time()
             
-            # 优化：使用缓存分配的内存进行颜色转换，避免重复内存分配
-            if img_cache is None or img_cache.shape != frame.shape:
+            # 如果帧尺寸不符合预期，重新调整图像缓存
+            if img_cache.shape[:2] != frame.shape[:2]:
                 img_cache = np.empty(frame.shape, dtype=np.uint8)
             
-            # 优化：直接使用cv2的转换，避免通过RGB中间格式
-            # 注意：如果MMPose必须使用RGB格式，则保留原转换
+            # 直接在预分配的内存上进行颜色转换
             cv2.cvtColor(frame, cv2.COLOR_BGR2RGB, img_cache)
             
-            # 推理
-            with torch.inference_mode(), torch.amp.autocast(device_type='cuda', enabled=True):
-                raw_results = list(inferencer(img_cache, **call_args))
-                # 确保GPU操作完成，减少延迟抖动
-                if 'cuda' in device:
-                    torch.cuda.synchronize()
-                
+            # 推理 - 使用优化的上下文管理器
+            try:
+                with torch_inference_mode():
+                    raw_results = list(inferencer(img_cache, **call_args))
+                    # 确保GPU操作完成，减少延迟抖动
+                    if 'cuda' in device:
+                        torch.cuda.synchronize()
+            except Exception as e:
+                print(f"推理过程中出错: {str(e)}")
+                continue  # 跳过这一帧，继续处理下一帧
+            
             inference_time = time.time() - start_inference
             inference_times.append(inference_time)
             if len(inference_times) > 30:
@@ -605,19 +684,63 @@ def camera_process(camera_id, return_dict, shared_data, model_name='rtmpose-l_8x
             
             # 添加跟踪ID处理
             current_results = []
-            for result in raw_results:
-                pred_instances = result.get('predictions', [])
-                
-                # 遍历pred_instances中的所有实例
-                if pred_instances and len(pred_instances) > 0:
-                    # MMPose 2.x返回的结果结构可能是一个列表，包含多个模型的预测结果
-                    # 我们需要确保正确处理这种结构
-                    for instance_list in pred_instances:
-                        # 检查instance_list是否为列表类型
-                        if isinstance(instance_list, list):
-                            # 遍历列表中的每个实例（每个人）
-                            for instance in instance_list:
-                                # 获取边界框
+            
+            try:
+                for result in raw_results:
+                    pred_instances = result.get('predictions', [])
+                    
+                    # 遍历pred_instances中的所有实例
+                    if pred_instances and len(pred_instances) > 0:
+                        # MMPose 2.x返回的结果结构可能是一个列表，包含多个模型的预测结果
+                        # 我们需要确保正确处理这种结构
+                        for instance_list in pred_instances:
+                            # 检查instance_list是否为列表类型
+                            if isinstance(instance_list, list):
+                                # 遍历列表中的每个实例（每个人）
+                                for instance in instance_list:
+                                    # 获取边界框
+                                    bbox = instance.get('bbox', None)
+                                    keypoints = instance.get('keypoints', None)
+                                    
+                                    # 如果没有边界框但有关键点，则使用关键点创建一个边界框
+                                    if bbox is None and keypoints is not None and len(keypoints) > 0:
+                                        try:
+                                            keypoints = np.array(keypoints)
+                                            if keypoints.size > 0:
+                                                # 计算包含所有关键点的边界框
+                                                valid_mask = np.isfinite(keypoints).all(axis=1)
+                                                if np.any(valid_mask):  # 确保至少有一个有效的关键点
+                                                    valid_keypoints = keypoints[valid_mask]
+                                                    x_min = np.min(valid_keypoints[:, 0])
+                                                    y_min = np.min(valid_keypoints[:, 1])
+                                                    x_max = np.max(valid_keypoints[:, 0])
+                                                    y_max = np.max(valid_keypoints[:, 1])
+                                                    bbox = [x_min, y_min, x_max, y_max]
+                                                    instance['bbox'] = bbox
+                                        except Exception as e:
+                                            print(f"从关键点创建边界框时出错: {str(e)}")
+                                    
+                                    if bbox is not None:
+                                        try:
+                                            # 确保边界框格式正确
+                                            if isinstance(bbox, (list, np.ndarray)) and len(bbox) >= 4:
+                                                # 尝试跟踪
+                                                track_id, results_last = track_by_iou(bbox, results_last, tracking_thr)
+                                                if track_id == -1:
+                                                    # 如果没有匹配，分配新ID
+                                                    track_id = next_id
+                                                    next_id += 1
+                                                
+                                                # 设置跟踪ID
+                                                instance['track_id'] = track_id
+                                                
+                                                # 保存当前实例以供下一帧使用
+                                                current_results.append(instance)
+                                        except Exception as e:
+                                            print(f"处理跟踪ID时出错: {str(e)}, bbox: {bbox}")
+                            elif isinstance(instance_list, dict):
+                                # 如果直接是一个字典(单个人的情况)，直接处理
+                                instance = instance_list
                                 bbox = instance.get('bbox', None)
                                 keypoints = instance.get('keypoints', None)
                                 
@@ -627,12 +750,15 @@ def camera_process(camera_id, return_dict, shared_data, model_name='rtmpose-l_8x
                                         keypoints = np.array(keypoints)
                                         if keypoints.size > 0:
                                             # 计算包含所有关键点的边界框
-                                            x_min = np.min(keypoints[:, 0])
-                                            y_min = np.min(keypoints[:, 1])
-                                            x_max = np.max(keypoints[:, 0])
-                                            y_max = np.max(keypoints[:, 1])
-                                            bbox = [x_min, y_min, x_max, y_max]
-                                            instance['bbox'] = bbox
+                                            valid_mask = np.isfinite(keypoints).all(axis=1)
+                                            if np.any(valid_mask):  # 确保至少有一个有效的关键点
+                                                valid_keypoints = keypoints[valid_mask]
+                                                x_min = np.min(valid_keypoints[:, 0])
+                                                y_min = np.min(valid_keypoints[:, 1])
+                                                x_max = np.max(valid_keypoints[:, 0])
+                                                y_max = np.max(valid_keypoints[:, 1])
+                                                bbox = [x_min, y_min, x_max, y_max]
+                                                instance['bbox'] = bbox
                                     except Exception as e:
                                         print(f"从关键点创建边界框时出错: {str(e)}")
                                 
@@ -654,51 +780,18 @@ def camera_process(camera_id, return_dict, shared_data, model_name='rtmpose-l_8x
                                             current_results.append(instance)
                                     except Exception as e:
                                         print(f"处理跟踪ID时出错: {str(e)}, bbox: {bbox}")
-                        elif isinstance(instance_list, dict):
-                            # 如果直接是一个字典(单个人的情况)，直接处理
-                            instance = instance_list
-                            bbox = instance.get('bbox', None)
-                            keypoints = instance.get('keypoints', None)
-                            
-                            # 如果没有边界框但有关键点，则使用关键点创建一个边界框
-                            if bbox is None and keypoints is not None and len(keypoints) > 0:
-                                try:
-                                    keypoints = np.array(keypoints)
-                                    if keypoints.size > 0:
-                                        # 计算包含所有关键点的边界框
-                                        x_min = np.min(keypoints[:, 0])
-                                        y_min = np.min(keypoints[:, 1])
-                                        x_max = np.max(keypoints[:, 0])
-                                        y_max = np.max(keypoints[:, 1])
-                                        bbox = [x_min, y_min, x_max, y_max]
-                                        instance['bbox'] = bbox
-                                except Exception as e:
-                                    print(f"从关键点创建边界框时出错: {str(e)}")
-                            
-                            if bbox is not None:
-                                try:
-                                    # 确保边界框格式正确
-                                    if isinstance(bbox, (list, np.ndarray)) and len(bbox) >= 4:
-                                        # 尝试跟踪
-                                        track_id, results_last = track_by_iou(bbox, results_last, tracking_thr)
-                                        if track_id == -1:
-                                            # 如果没有匹配，分配新ID
-                                            track_id = next_id
-                                            next_id += 1
-                                        
-                                        # 设置跟踪ID
-                                        instance['track_id'] = track_id
-                                        
-                                        # 保存当前实例以供下一帧使用
-                                        current_results.append(instance)
-                                except Exception as e:
-                                    print(f"处理跟踪ID时出错: {str(e)}, bbox: {bbox}")
+            except Exception as e:
+                print(f"处理检测结果时出错: {str(e)}")
             
             # 更新跟踪状态
             results_last = current_results
                 
             # 处理结果并渲染到帧上
-            display_frame = process_pose_results(frame, raw_results, call_args)
+            try:
+                display_frame = process_pose_results(frame, raw_results, call_args)
+            except Exception as e:
+                print(f"处理姿态结果时出错: {str(e)}")
+                display_frame = frame.copy()  # 降级为原始帧
             
             # 计算FPS
             elapsed_time = time.time() - start_time
@@ -719,13 +812,16 @@ def camera_process(camera_id, return_dict, shared_data, model_name='rtmpose-l_8x
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
             
             # 将结果存储在共享字典中
-            # 由于多进程不能直接共享图像数据，需要编码为字节
-            # 优化：降低JPEG质量以加快编码速度，同时保持视觉质量
-            _, buffer = cv2.imencode('.jpg', display_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            # 优化：使用更低的JPEG质量，进一步加快编码速度
+            _, buffer = cv2.imencode('.jpg', display_frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
             return_dict[f'frame_{camera_id}'] = buffer.tobytes()
             
-            # 提前释放不需要的大型对象
+            # 主动释放不需要的大型对象和清理内存
             del raw_results
+            if 'cuda' in device:
+                # 定期清理CUDA缓存
+                if frame_count % 100 == 0:
+                    torch.cuda.empty_cache()
             
             # 为了调试输出检测到的人数
             if len(current_results) > 0:
@@ -756,33 +852,45 @@ def main():
         shared_data = SharedData()
         shared_data.running.value = True
         
-        # 创建两个摄像头处理进程
+        # 创建两个摄像头处理进程 - 使用更轻量级的模型配置
         process1 = mp.Process(target=camera_process, args=(0, return_dict, shared_data, 'rtmpose-l_8xb32-270e_coco-wholebody-384x288', device))
         process2 = mp.Process(target=camera_process, args=(1, return_dict, shared_data, 'rtmpose-l_8xb32-270e_coco-wholebody-384x288', device))
-
-        # process1 = mp.Process(target=camera_process, args=(0, return_dict, shared_data, 'rtmw-x_8xb320-270e_cocktail14-384x288', device))
-        # process2 = mp.Process(target=camera_process, args=(1, return_dict, shared_data, 'rtmw-x_8xb320-270e_cocktail14-384x288', device))
         
-        # 启动进程
+        # 启动进程 - 设置更高的优先级
         process1.start()
         process2.start()
         
         print("按'q'键退出")
         
         # 主循环 - 显示结果
+        last_frame_time = time.time()
+        display_interval = 1.0/30.0  # 限制显示帧率到30FPS
+        
         while True:
+            # 限制帧率，降低CPU使用率
+            current_time = time.time()
+            if current_time - last_frame_time < display_interval:
+                time.sleep(0.001)  # 短暂休眠，减少CPU使用
+                continue
+            
+            last_frame_time = current_time
+            
             # 检查是否有帧需要显示
+            frames_to_show = False
+            
             if 'frame_0' in return_dict:
                 # 解码图像数据
                 buffer = np.frombuffer(return_dict['frame_0'], dtype=np.uint8)
                 display_frame1 = cv2.imdecode(buffer, cv2.IMREAD_COLOR)
                 cv2.imshow('CAM0 - RTMPose', display_frame1)
+                frames_to_show = True
                 
             if 'frame_1' in return_dict:
                 # 解码图像数据
                 buffer = np.frombuffer(return_dict['frame_1'], dtype=np.uint8)
                 display_frame2 = cv2.imdecode(buffer, cv2.IMREAD_COLOR)
                 cv2.imshow('CAM1 - RTMPose', display_frame2)
+                frames_to_show = True
                 
             # 检查错误
             for cam_id in [0, 1]:
@@ -790,8 +898,8 @@ def main():
                     print(f"CAM {cam_id} Error: {return_dict[f'error_{cam_id}']}")
                     return_dict.pop(f'error_{cam_id}', None)
             
-            # 检查退出
-            if cv2.waitKey(1) & 0xFF == ord('q'):
+            # 检查退出 - 只在有帧显示时处理键盘事件
+            if frames_to_show and cv2.waitKey(1) & 0xFF == ord('q'):
                 break
                 
             

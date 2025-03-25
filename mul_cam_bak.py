@@ -7,7 +7,7 @@ import threading
 import queue
 import multiprocessing as mp
 from mmpose.apis.inferencers import MMPoseInferencer
-from mmpose.apis.inference_tracking import _compute_iou  # 导入MMPose提供的IOU计算函数
+from mmpose.apis.inference_tracking import _compute_iou
 from contextlib import contextmanager
 from typing import Dict, List, Tuple, Optional
 
